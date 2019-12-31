@@ -1,7 +1,6 @@
 package v1alpha1
 
 import (
-	v1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -15,10 +14,21 @@ type DepSvcResource struct {
 	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 
 	// +optional
-	Status v1.DeploymentStatus `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+	Status DepSvcResourceStatus `json:"status,omitempty" protobuf:"bytes,3,opt,name=status"`
 	// This is where you can define
 	// your own custom spec
-	Spec v1.DeploymentSpec `json:"status,omitempty" protobuf:"bytes,3,opt,name=status"`
+	Spec DepSvcResourceSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+}
+
+// DepSvcResourceSpec is the spec for a Foo resource
+type DepSvcResourceSpec struct {
+	DeploymentName string `json:"deploymentName"`
+	Replicas       *int32 `json:"replicas"`
+}
+
+// DepSvcResourceStatus is the status for a DepSvcResource
+type DepSvcResourceStatus struct {
+	AvailableReplicas int32 `json:"availableReplicas"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

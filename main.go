@@ -1,124 +1,71 @@
 package main
 
 import (
+	"flag"
 	"os"
-	"os/signal"
-	"syscall"
+	"time"
 
-	logger "github.com/sirupsen/logrus"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog"
+	"k8s.io/sample-controller/pkg/signals"
 
-	"github.com/rahulsidgondapatil/sample-customController/pkg/client/clientset/versioned"
-	v1 "github.com/rahulsidgondapatil/sample-customController/pkg/client/informers/externalversions/DepSvcResource/v1"
+	"github.com/google/logger"
+	clientset "github.com/rahulsidgondapatil/sample-customController/pkg/client/clientset/versioned"
+	informers "github.com/rahulsidgondapatil/sample-customController/pkg/client/informers/externalversions"
 )
 
-// retrieve the Kubernetes cluster client from outside of the cluster
-func getKubernetesClient() (kubernetes.Interface, versioned.Interface) {
+var (
+	masterURL  string
+	kubeconfig string
+)
+
+// main code path
+func main() {
+	klog.InitFlags(nil)
+	flag.Parse()
+
+	// set up signals so we handle the first shutdown signal gracefully
+	stopCh := signals.SetupSignalHandler()
+
 	// construct the path to resolve to `~/.kube/config`
 	kubeConfigPath := os.Getenv("HOME") + "/.kube/config"
 
 	// create the config from the path
-	config, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
 	if err != nil {
 		logger.Fatalf("getClusterConfig: %v", err)
 	}
 
-	// generate the client based off of the config
-	client, err := kubernetes.NewForConfig(config)
+	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		logger.Fatalf("getClusterConfig: %v", err)
+		klog.Fatalf("Error building kubernetes clientset: %s", err.Error())
 	}
 
-	DepSvcResourceClient, err := versioned.NewForConfig(config)
+	exampleClient, err := clientset.NewForConfig(cfg)
 	if err != nil {
-		logger.Fatalf("getClusterConfig: %v", err)
+		klog.Fatalf("Error building example clientset: %s", err.Error())
 	}
 
-	logger.Info("Successfully constructed k8s client")
-	return client, DepSvcResourceClient
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
+	exampleInformerFactory := informers.NewSharedInformerFactory(exampleClient, time.Second*30)
+
+	controller := NewController(kubeClient, exampleClient,
+		kubeInformerFactory.Apps().V1().Deployments(),
+		exampleInformerFactory.Customcontroller().V1alpha1().DepSvcResources())
+
+	// notice that there is no need to run Start methods in a separate goroutine. (i.e. go kubeInformerFactory.Start(stopCh)
+	// Start method is non-blocking and runs all registered informers in a dedicated goroutine.
+	kubeInformerFactory.Start(stopCh)
+	exampleInformerFactory.Start(stopCh)
+
+	if err = controller.Run(2, stopCh); err != nil {
+		klog.Fatalf("Error running controller: %s", err.Error())
+	}
 }
 
-// main code path
-func main() {
-	// get the Kubernetes client for connectivity
-	client, DepSvcResourceClient := getKubernetesClient()
-
-	// retrieve our custom resource informer which was generated from
-	// the code generator and pass it the custom resource client, specifying
-	// we should be looking through all namespaces for listing and watching
-	informer := v1.NewDepSvcResourceInformer(
-		DepSvcResourceClient,
-		metav1.NamespaceAll,
-		0,
-		cache.Indexers{},
-	)
-
-	// create a new queue so that when the informer gets a resource that is either
-	// a result of listing or watching, we can add an idenfitying key to the queue
-	// so that it can be handled in the handler
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-
-	// add event handlers to handle the three types of events for resources:
-	//  - adding new resources
-	//  - updating existing resources
-	//  - deleting resources
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			// convert the resource object into a key (in this case
-			// we are just doing it in the format of 'namespace/name')
-			key, err := cache.MetaNamespaceKeyFunc(obj)
-			logger.Infof("Add DepSvcResource: %s", key)
-			if err == nil {
-				// add the key to the queue for the handler to get
-				queue.Add(key)
-			}
-		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			key, err := cache.MetaNamespaceKeyFunc(newObj)
-			logger.Infof("Update DepSvcResource: %s", key)
-			if err == nil {
-				queue.Add(key)
-			}
-		},
-		DeleteFunc: func(obj interface{}) {
-			// DeletionHandlingMetaNamsespaceKeyFunc is a helper function that allows
-			// us to check the DeletedFinalStateUnknown existence in the event that
-			// a resource was deleted but it is still contained in the index
-			//
-			// this then in turn calls MetaNamespaceKeyFunc
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			logger.Infof("Delete DepSvcResource: %s", key)
-			if err == nil {
-				queue.Add(key)
-			}
-		},
-	})
-
-	// construct the Controller object which has all of the necessary components to
-	// handle logging, connections, informing (listing and watching), the queue,
-	// and the handler
-	controller := DepSvcController{
-		logger:    logger.NewEntry(logger.New()),
-		clientset: client,
-		informer:  informer,
-		queue:     queue,
-		handler:   &TestHandler{},
-	}
-	// use a channel to synchronize the finalization for a graceful shutdown
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-
-	// run the controller loop to process items
-	go controller.Run(stopCh)
-
-	// use a channel to handle OS signals to terminate and gracefully shut
-	// down processing
-	sigTerm := make(chan os.Signal, 1)
-	signal.Notify(sigTerm, syscall.SIGTERM)
-	signal.Notify(sigTerm, syscall.SIGINT)
-	<-sigTerm
+func init() {
+	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
+	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 }

@@ -5,4 +5,5 @@ Run following commands in ~/go/src/github.com/rahulsidgondapatil/sample-depSvcCo
 3) bash -x vendor/k8s.io/code-generator/generate-groups.sh all \
     "github.com/rahulsidgondapatil/sample-customController/pkg/client" \
     "github.com/rahulsidgondapatil/sample-customController/pkg/apis" \
-    customcontroller:v1alpha1
+    customcontroller:v1alpha1   \
+    --go-header-file ./hack/boilerplate.go.txt
