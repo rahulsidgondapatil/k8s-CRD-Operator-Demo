@@ -1,9 +1,9 @@
----
 apiVersion: customcontroller.k8s.io/v1alpha1
-kind: DepSvcResource                 # Type of Kubernetes resource
+kind: DepSvcResource
 metadata:
-  name: fserver           # Name of the Kubernetes resource
-spec:
+  name: fserver  
+deploymentSpec:
+  deploymentName: fserver
   replicas: 3                    # Number of pods to run at any given time
   selector:
     matchLabels:

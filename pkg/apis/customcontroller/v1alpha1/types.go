@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -22,13 +23,14 @@ type DepSvcResource struct {
 
 // DepSvcResourceSpec is the spec for a Foo resource
 type DepSvcResourceSpec struct {
-	DeploymentName string `json:"deploymentName"`
-	Replicas       *int32 `json:"replicas"`
+	DeploymentName string        `json:"deploymentName"`
+	Deployment     v1.Deployment `json:"deployment"`
 }
 
 // DepSvcResourceStatus is the status for a DepSvcResource
 type DepSvcResourceStatus struct {
-	AvailableReplicas int32 `json:"availableReplicas"`
+	AvailableReplicas int32               `json:"availableReplicas"`
+	DeploymentStatus  v1.DeploymentStatus `json:"deploymentStatus"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

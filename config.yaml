@@ -1,0 +1,3 @@
+settings:
+ auto-create-svc: true
+ auto-create-svc-type: "NodePort"

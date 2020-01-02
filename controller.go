@@ -5,9 +5,11 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
@@ -20,6 +22,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
 
+	conf "github.com/rahulsidgondapatil/sample-customController/conf"
 	customcontroller "github.com/rahulsidgondapatil/sample-customController/pkg/apis/customcontroller/v1alpha1"
 	clientset "github.com/rahulsidgondapatil/sample-customController/pkg/client/clientset/versioned"
 	samplescheme "github.com/rahulsidgondapatil/sample-customController/pkg/client/clientset/versioned/scheme"
@@ -46,6 +49,7 @@ const (
 
 //Controller...
 type Controller struct {
+	Cfg *conf.Config
 	// kubeclientset is a standard kubernetes clientset
 	Kubeclientset kubernetes.Interface
 	// sampleclientset is a clientset for our own API group
@@ -69,6 +73,7 @@ type Controller struct {
 
 // NewController returns a new sample controller
 func NewController(
+	cfg *conf.Config,
 	kubeclientset kubernetes.Interface,
 	sampleclientset clientset.Interface,
 	deploymentInformer appsinformers.DeploymentInformer,
@@ -85,13 +90,14 @@ func NewController(
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
 
 	controller := &Controller{
+		Cfg:                   cfg,
 		Kubeclientset:         kubeclientset,
 		Sampleclientset:       sampleclientset,
 		DeploymentsLister:     deploymentInformer.Lister(),
 		DeploymentsSynced:     deploymentInformer.Informer().HasSynced,
 		DepSvcResourceLister:  depSvcResourceInformer.Lister(),
 		DepSvcResourcesSynced: depSvcResourceInformer.Informer().HasSynced,
-		workqueue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "depsvcresources"),
+		workqueue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "DepSvcResources"),
 		recorder:              recorder,
 	}
 
@@ -200,7 +206,7 @@ func (c *Controller) processNextWorkItem() bool {
 			return nil
 		}
 		// Run the syncHandler, passing it the namespace/name string of the
-		// DepSvcResource resource to be synced.
+		// DepSvcResource to be synced.
 		if err := c.syncHandler(key); err != nil {
 			// Put the item back on the workqueue to handle any transient errors.
 			c.workqueue.AddRateLimited(key)
@@ -222,15 +228,17 @@ func (c *Controller) processNextWorkItem() bool {
 }
 
 // syncHandler compares the actual state with the desired, and attempts to
-// converge the two. It then updates the Status block of the DepSvcResource resource
+// converge the two. It then updates the Status block of the DepSvcResource
 // with the current status of the resource.
 func (c *Controller) syncHandler(key string) error {
+	klog.Info("\nIn syncHandler: key:%v", key)
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		runtime.HandleError(fmt.Errorf("invalid resource key: %s", key))
 		return nil
 	}
+	klog.Info("\nsyncHandler: Namespace:%v", namespace)
 
 	// Get the DepSvcResource with this namespace/name
 	depSvcResource, err := c.DepSvcResourceLister.DepSvcResources(namespace).Get(name)
@@ -244,8 +252,9 @@ func (c *Controller) syncHandler(key string) error {
 
 		return err
 	}
+	fmt.Printf("\nsyncHandler: Retrieved depSvcResource:%+v\n", depSvcResource)
 
-	deploymentName := depSvcResource.Name
+	deploymentName := depSvcResource.Spec.DeploymentName
 	if deploymentName == "" {
 		// We choose to absorb the error here as the worker would requeue the
 		// resource otherwise. Instead, the next time the resource is updated
@@ -258,8 +267,17 @@ func (c *Controller) syncHandler(key string) error {
 	deployment, err := c.DeploymentsLister.Deployments(depSvcResource.Namespace).Get(deploymentName)
 	// If the resource doesn't exist, we'll create it
 	if errors.IsNotFound(err) {
+		klog.Info("\nsyncHandler: If the resource doesn't exist, we'll create it\n")
 		deployment, err = c.Kubeclientset.AppsV1().Deployments(depSvcResource.Namespace).Create(newDeployment(depSvcResource))
 	}
+	klog.Info("\nsyncHandler: Created deployment:%+v\n", deployment)
+
+	svclient := c.Kubeclientset.CoreV1().Services(corev1.NamespaceDefault)
+	res, err := svclient.Create(newSvcObject(deployment, c.Cfg))
+	if err != nil {
+		fmt.Printf("\nError:%+v", err.Error())
+	}
+	klog.Info("\nCreated service %v for deployment:%v\n", res, deployment.Name)
 
 	// If an error occurs during Get/Create, we'll requeue the item so we can
 	// attempt processing again later. This could have been caused by a
@@ -279,17 +297,17 @@ func (c *Controller) syncHandler(key string) error {
 	// If this number of the replicas on the DepSvcResource resource is specified, and the
 	// number does not equal the current desired replicas on the Deployment, we
 	// should update the Deployment resource.
-	if depSvcResource.Spec.Replicas != nil && *depSvcResource.Spec.Replicas != *deployment.Spec.Replicas {
-		klog.V(4).Infof("depSvcResource %s replicas: %d, deployment replicas: %d", name, *depSvcResource.Spec.Replicas, *deployment.Spec.Replicas)
-		deployment, err = c.Kubeclientset.AppsV1().Deployments(depSvcResource.Namespace).Update(newDeployment(depSvcResource))
-	}
+	/*	if &depSvcResource.Spec.Replicas != nil && &depSvcResource.Spec.Replicas != deployment.Spec.Replicas {
+			klog.V(4).Infof("depSvcResource %s replicas: %d, deployment replicas: %d", name, depSvcResource.Spec.Replicas, *deployment.Spec.Replicas)
+			deployment, err = c.Kubeclientset.AppsV1().Deployments(depSvcResource.Namespace).Update(newDeployment(depSvcResource))
+		}
 
-	// If an error occurs during Update, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
-	if err != nil {
-		return err
-	}
+		// If an error occurs during Update, we'll requeue the item so we can
+		// attempt processing again later. This could have been caused by a
+		// temporary network failure, or any other transient reason.
+		if err != nil {
+			return err
+		}*/
 
 	// Finally, we update the status block of the DepSvcResource resource to reflect the
 	// current state of the world
@@ -372,7 +390,8 @@ func (c *Controller) handleObject(obj interface{}) {
 // newDeployment creates a new Deployment for a DepSvcResource. It also sets
 // the appropriate OwnerReferences on the resource so handleObject can discover
 // the DepSvcResource resource that 'owns' it.
-func newDeployment(depSvcResource *customcontroller.DepSvcResource) *appsv1.Deployment {
+/*func newDeployment(depSvcResource *customcontroller.DepSvcResource) *appsv1.Deployment {
+	klog.Info("\ndepSvcResource to be deployed is:'%+v\n", depSvcResource)
 	labels := map[string]string{
 		"app":        "nginx",
 		"controller": depSvcResource.Name,
@@ -400,6 +419,32 @@ func newDeployment(depSvcResource *customcontroller.DepSvcResource) *appsv1.Depl
 							Name:  "nginx",
 							Image: "nginx:latest",
 						},
+					},
+				},
+			},
+		},
+	}
+}*/
+
+func newDeployment(depSvcResource *customcontroller.DepSvcResource) *appsv1.Deployment {
+	fmt.Printf("\ndepSvcResource to be deployed is:'%+v\n", depSvcResource)
+	return &depSvcResource.Spec.Deployment
+}
+
+func newSvcObject(d *v1.Deployment, cfg *conf.Config) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: d.ObjectMeta.Name,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     "NodePort",
+			Selector: d.Spec.Selector.MatchLabels,
+			Ports: []corev1.ServicePort{
+				corev1.ServicePort{
+					Name: "http",
+					Port: 9090,
+					TargetPort: intstr.IntOrString{
+						IntVal: 8080,
 					},
 				},
 			},
