@@ -22,7 +22,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
 
-	conf "github.com/rahulsidgondapatil/sample-customController/conf"
+	"github.com/rahulsidgondapatil/sample-customController/conf"
 	customcontroller "github.com/rahulsidgondapatil/sample-customController/pkg/apis/customcontroller/v1alpha1"
 	clientset "github.com/rahulsidgondapatil/sample-customController/pkg/client/clientset/versioned"
 	samplescheme "github.com/rahulsidgondapatil/sample-customController/pkg/client/clientset/versioned/scheme"
@@ -254,7 +254,7 @@ func (c *Controller) syncHandler(key string) error {
 	}
 	fmt.Printf("\nsyncHandler: Retrieved depSvcResource:%+v\n", depSvcResource)
 
-	deploymentName := depSvcResource.Spec.DeploymentName
+	deploymentName := depSvcResource.Name
 	if deploymentName == "" {
 		// We choose to absorb the error here as the worker would requeue the
 		// resource otherwise. Instead, the next time the resource is updated
@@ -428,7 +428,20 @@ func (c *Controller) handleObject(obj interface{}) {
 
 func newDeployment(depSvcResource *customcontroller.DepSvcResource) *appsv1.Deployment {
 	fmt.Printf("\ndepSvcResource to be deployed is:'%+v\n", depSvcResource)
-	return &depSvcResource.Spec.Deployment
+	return &v1.Deployment{
+		TypeMeta:   depSvcResource.TypeMeta,
+		ObjectMeta: depSvcResource.ObjectMeta,
+		Spec: v1.DeploymentSpec{
+			Replicas:                depSvcResource.Spec.Replicas,
+			Selector:                depSvcResource.Spec.Selector,
+			Template:                depSvcResource.Spec.Template,
+			Strategy:                depSvcResource.Spec.Strategy,
+			MinReadySeconds:         depSvcResource.Spec.MinReadySeconds,
+			RevisionHistoryLimit:    depSvcResource.Spec.RevisionHistoryLimit,
+			Paused:                  depSvcResource.Spec.Paused,
+			ProgressDeadlineSeconds: depSvcResource.Spec.ProgressDeadlineSeconds,
+		},
+	}
 }
 
 func newSvcObject(d *v1.Deployment, cfg *conf.Config) *corev1.Service {
