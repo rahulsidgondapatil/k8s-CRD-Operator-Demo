@@ -108,6 +108,7 @@ func NewController(
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueueDepSvcResource(new)
 		},
+		DeleteFunc: controller.enqueueDepSvcResource,
 	})
 	// Set up an event handler for when Deployment resources change. This
 	// handler will lookup the owner of the given Deployment, and if it is
@@ -231,14 +232,12 @@ func (c *Controller) processNextWorkItem() bool {
 // converge the two. It then updates the Status block of the DepSvcResource
 // with the current status of the resource.
 func (c *Controller) syncHandler(key string) error {
-	klog.Info("In syncHandler: key:%v", key)
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		runtime.HandleError(fmt.Errorf("invalid resource key: %s", key))
 		return nil
 	}
-	klog.Info("syncHandler: Namespace:%v; name:%v", namespace, name)
 
 	// Get the DepSvcResource with this namespace/name
 	depSvcResource, err := c.DepSvcResourceLister.DepSvcResources(namespace).Get(name)
@@ -247,15 +246,13 @@ func (c *Controller) syncHandler(key string) error {
 		// processing.
 		if errors.IsNotFound(err) {
 			runtime.HandleError(fmt.Errorf("depSvcResource '%s' in work queue no longer exists", key))
+			// We delete the corresponding service as well
+			c.deleteSvc(name, namespace)
 			return nil
 		}
 
 		return err
 	}
-	klog.Info("\nsyncHandler: Retrieved depSvcResource:%v\n", depSvcResource.Name)
-	//klog.Info("\nsyncHandler: Retrieved depSvcResource.TypeMeta:%+v\n", depSvcResource.TypeMeta)
-	//klog.Info("\nsyncHandler: Retrieved depSvcResource.ObjectMeta:%+v\n", depSvcResource.ObjectMeta)
-	//klog.Info("\nsyncHandler: Retrieved depSvcResource.Spec:%+v\n", depSvcResource.Spec)
 
 	deploymentName := depSvcResource.Name
 	if deploymentName == "" {
@@ -270,7 +267,6 @@ func (c *Controller) syncHandler(key string) error {
 	deployment, err := c.DeploymentsLister.Deployments(depSvcResource.Namespace).Get(deploymentName)
 	// If the resource doesn't exist, we'll create it
 	if errors.IsNotFound(err) {
-		klog.Info("\nsyncHandler: If the resource doesn't exist, we'll create it\n")
 		c.newDeployNService(depSvcResource)
 	}
 	//klog.Info("\nsyncHandler: Created deployment:%+v\n", deployment)
@@ -386,12 +382,27 @@ func (c *Controller) handleObject(obj interface{}) {
 func (c *Controller) newDeployNService(depSvcResource *customcontroller.DepSvcResource) {
 	deployment, err := c.Kubeclientset.AppsV1().Deployments(depSvcResource.Namespace).Create(newDeployment(depSvcResource))
 	klog.Info("\nCreated deployment:'%v\n", deployment.Name)
-	svclient := c.Kubeclientset.CoreV1().Services(corev1.NamespaceDefault)
+	svclient := c.Kubeclientset.CoreV1().Services(depSvcResource.Namespace)
 	res, err := svclient.Create(newSvcObject(deployment, c.Cfg))
 	if err != nil {
 		fmt.Printf("\nError:%+v", err.Error())
 	}
 	klog.Info("\nCreated service %v for deployment:%v\n", res.Name, deployment.Name)
+}
+
+func (c *Controller) deleteSvc(name, namespace string) {
+	svclient := c.Kubeclientset.CoreV1().Services(namespace)
+	svc, _ := svclient.Get(name, metav1.GetOptions{})
+	if svc.ObjectMeta.Name == name {
+		klog.Info("Deleting service for depSvcResource:%v...\n", name)
+		deletePolicy := metav1.DeletePropagationForeground
+		if err := svclient.Delete(name, &metav1.DeleteOptions{
+			PropagationPolicy: &deletePolicy,
+		}); err != nil {
+			panic(err)
+		}
+		klog.Info("Deleted service for depSvcResource:%v\n", name)
+	}
 }
 
 func newDeployment(depSvcResource *customcontroller.DepSvcResource) *appsv1.Deployment {
@@ -422,17 +433,26 @@ func newSvcObject(d *v1.Deployment, cfg *conf.Config) *corev1.Service {
 			Name: d.ObjectMeta.Name,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     "NodePort",
+			Type:     cfg.Settings.AutocreateSvcType,
 			Selector: d.Spec.Selector.MatchLabels,
-			Ports: []corev1.ServicePort{
-				corev1.ServicePort{
-					Name: "http",
-					Port: 9090,
-					TargetPort: intstr.IntOrString{
-						IntVal: 8080,
-					},
-				},
-			},
+			Ports:    getSvcPorts(d.Spec.Template.Spec.Containers, 9090),
 		},
 	}
+}
+
+func getSvcPorts(containers []corev1.Container, firstPort int32) []corev1.ServicePort {
+	svcPorts := make([]corev1.ServicePort, 0)
+	portNumber := firstPort
+	for _, c := range containers {
+		svcPort := corev1.ServicePort{
+			Name: c.Name,
+			Port: portNumber,
+			TargetPort: intstr.IntOrString{
+				IntVal: c.Ports[0].ContainerPort,
+			},
+		}
+		svcPorts = append(svcPorts, svcPort)
+		portNumber++
+	}
+	return svcPorts
 }
