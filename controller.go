@@ -106,7 +106,14 @@ func NewController(
 	depSvcResourceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueDepSvcResource,
 		UpdateFunc: func(old, new interface{}) {
-			controller.enqueueDepSvcResource(new)
+			object := new.(*customcontroller.DepSvcResource)
+			if object.DeletionTimestamp != nil && object.Finalizers != nil {
+				// We should delete the corresponding service before deleting the object
+				controller.deleteSvc(object.Name, object.Namespace)
+				//We now have to delete the finalizer entry otherwise the object won't get deleted
+				object.Finalizers = object.Finalizers[:0]
+			}
+			controller.enqueueDepSvcResource(object)
 		},
 		DeleteFunc: controller.enqueueDepSvcResource,
 	})
@@ -246,8 +253,6 @@ func (c *Controller) syncHandler(key string) error {
 		// processing.
 		if errors.IsNotFound(err) {
 			runtime.HandleError(fmt.Errorf("depSvcResource '%s' in work queue no longer exists", key))
-			// We delete the corresponding service as well
-			c.deleteSvc(name, namespace)
 			return nil
 		}
 
@@ -380,14 +385,24 @@ func (c *Controller) handleObject(obj interface{}) {
 }
 
 func (c *Controller) newDeployNService(depSvcResource *customcontroller.DepSvcResource) {
-	deployment, err := c.Kubeclientset.AppsV1().Deployments(depSvcResource.Namespace).Create(newDeployment(depSvcResource))
+	deployment, _ := c.Kubeclientset.AppsV1().Deployments(depSvcResource.Namespace).Create(newDeployment(depSvcResource))
 	klog.Info("\nCreated deployment:'%v\n", deployment.Name)
-	svclient := c.Kubeclientset.CoreV1().Services(depSvcResource.Namespace)
-	res, err := svclient.Create(newSvcObject(deployment, c.Cfg))
-	if err != nil {
-		fmt.Printf("\nError:%+v", err.Error())
+	createSvc := c.Cfg.Settings.AutoCreateSvc
+	if val, ok := depSvcResource.Annotations["auto-create-svc"]; ok {
+		if val == "yes" {
+			createSvc = true
+		} else {
+			createSvc = false
+		}
 	}
-	klog.Info("\nCreated service %v for deployment:%v\n", res.Name, deployment.Name)
+	if createSvc {
+		svclient := c.Kubeclientset.CoreV1().Services(depSvcResource.Namespace)
+		res, err := svclient.Create(newSvcObject(deployment, c.Cfg))
+		if err != nil {
+			fmt.Printf("\nError:%+v", err.Error())
+		}
+		klog.Info("\nCreated service %v for deployment:%v\n", res.Name, deployment.Name)
+	}
 }
 
 func (c *Controller) deleteSvc(name, namespace string) {
@@ -408,11 +423,12 @@ func (c *Controller) deleteSvc(name, namespace string) {
 func newDeployment(depSvcResource *customcontroller.DepSvcResource) *appsv1.Deployment {
 	return &v1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      depSvcResource.ObjectMeta.Name,
-			Namespace: depSvcResource.ObjectMeta.Namespace,
+			Name:      depSvcResource.Name,
+			Namespace: depSvcResource.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(depSvcResource, customcontroller.SchemeGroupVersion.WithKind("DepSvcResource")),
 			},
+			Annotations: depSvcResource.Annotations,
 		},
 		Spec: v1.DeploymentSpec{
 			Replicas:                depSvcResource.Spec.Replicas,
@@ -428,12 +444,16 @@ func newDeployment(depSvcResource *customcontroller.DepSvcResource) *appsv1.Depl
 }
 
 func newSvcObject(d *v1.Deployment, cfg *conf.Config) *corev1.Service {
+	svcType := cfg.Settings.AutocreateSvcType
+	if val, ok := d.Annotations["auto-create-svc-type"]; ok {
+		svcType = corev1.ServiceType(val)
+	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: d.ObjectMeta.Name,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     cfg.Settings.AutocreateSvcType,
+			Type:     svcType,
 			Selector: d.Spec.Selector.MatchLabels,
 			Ports:    getSvcPorts(d.Spec.Template.Spec.Containers, 9090),
 		},

@@ -2,7 +2,12 @@ apiVersion: customcontroller.k8s.io/v1alpha1
 kind: DepSvcResource
 metadata:
   name: fserver
-  namespace: default  
+  namespace: default
+  finalizers:
+  - finalizer.customcontroller.k8s.io  
+  annotations:
+    auto-create-svc: "yes"
+    auto-create-svc-type: "NodePort"
 spec:
   replicas: 3                  # Number of pods to run at any given time
   selector:
