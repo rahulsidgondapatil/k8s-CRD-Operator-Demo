@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-customcontroller
+  labels:
+    app: sample-customcontroller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sample-customcontroller
+  template:
+    metadata:
+      labels:
+        app: sample-customcontroller
+    spec:
+      containers:
+        - name: sample-customcontroller
+          image: rahulsidgondapatil/customcontroller
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
